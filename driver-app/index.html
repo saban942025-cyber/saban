@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sidor | אפליקציית נהג</title>
+
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 2. OneSignal SDK -->
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      OneSignalDeferred.push(async function(OneSignal) {
+        await OneSignal.init({
+          appId: "de3834d3-1e11-40af-96d2-b25eda821c8f", // Using the same detected App ID
+        });
+        OneSignal.User.addTag("app_name", "driver_app");
+      });
+    </script>
+
+    <!-- 3. Firebase SDK (Modern Modular v11+) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithPhoneNumber, RecaptchaVerifier, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Config & Init ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let db, auth;
+
+        // --- UI & Utility ---
+        const SmartLog = (module, message, level = 'info') => {
+            console[level](`[${module}] ${level.toUpperCase()}:`, message);
+        };
+
+        const showMessage = (message, isError = false) => {
+            const el = document.getElementById('message-output');
+            if (!el) return;
+            el.textContent = message;
+            el.classList.remove(isError ? 'text-green-400' : 'text-red-400');
+            el.classList.add(isError ? 'text-red-400' : 'text-green-400');
+            el.classList.remove('hidden');
+        };
+
+        const setLoading = (isLoading) => {
+            document.getElementById('login-button').disabled = isLoading;
+            document.getElementById('loading-spinner').classList.toggle('hidden', !isLoading);
+            document.getElementById('button-text').classList.toggle('hidden', isLoading);
+        };
+
+        // --- Auth Logic ---
+        async function handleLogin() {
+            setLoading(true);
+            showMessage('מאמת נתונים...', false);
+            const phone = document.getElementById('phone').value;
+            
+            if (!phone || phone.length < 9) {
+                showMessage('אנא הזן מספר טלפון תקין.', true);
+                setLoading(false);
+                return;
+            }
+
+            // In a real app, you would now use signInWithPhoneNumber
+            // For this simulation, we'll just log the attempt and sign in anonymously
+            // to test the auth flow.
+            
+            try {
+                // Placeholder for phone auth logic
+                SmartLog('Auth', `Attempting login for phone: ${phone}`);
+                
+                // Simulate a successful login after 1 second
+                setTimeout(() => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        signInWithCustomToken(auth, __initial_auth_token)
+                            .then(() => {
+                                SmartLog('Auth', 'Signed in with custom token.');
+                                showMessage('התחברת בהצלחה!', false);
+                                // Here: redirect to the main app dashboard
+                                // window.location.href = './dashboard.html';
+                            });
+                    } else {
+                        signInAnonymously(auth).then(() => {
+                            SmartLog('Auth', 'No token provided, signed in anonymously for demo.');
+                            showMessage('התחברות אנונימית (דמו) הצליחה!', false);
+                        });
+                    }
+                    setLoading(false);
+                }, 1000);
+
+            } catch (error) {
+                SmartLog('Auth.Error', error, 'error');
+                showMessage(`שגיאה: ${error.message}`, true);
+                setLoading(false);
+            }
+        }
+        
+        // --- Main Function ---
+        function main() {
+            // FIX: Add Guard Clause for Firebase Config
+            if (!firebaseConfig.projectId) {
+                SmartLog('Auth.Error', 'Firebase config is missing or invalid. "projectId" is required.', 'error');
+                showMessage('שגיאת הגדרה קריטית. "projectId" חסר.', true);
+                return; // Stop execution
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('Debug');
+
+            document.getElementById('login-button').addEventListener('click', handleLogin);
+            
+            // Setup reCAPTCHA (required for phone auth)
+            // Note: This will not work in the preview iframe, but is required for real deployment
+            try {
+                window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+                  'size': 'invisible',
+                  'callback': (response) => {
+                    // reCAPTCHA solved, allow signInWithPhoneNumber.
+                  }
+                });
+                SmartLog('Auth', 'RecaptchaVerifier initialized.');
+            } catch (e) {
+                SmartLog('Auth.Recaptcha', 'Recaptcha failed to initialize (expected in iframe).', 'warn');
+            }
+
+            SmartLog('Init', 'Driver App Login screen initialized.');
+        }
+
+        document.addEventListener('DOMContentLoaded', main);
+    </script>
+
+    <!-- 4. Custom Styles -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #1a202c; /* Dark background */
+        }
+        
+        .glass-card {
+            background: rgba(45, 55, 72, 0.4); /* Dark glass */
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 16px;
+        }
+
+        .btn-animated {
+            @apply px-6 py-3 rounded-lg font-bold text-white bg-blue-600 shadow-lg transition-all duration-300 ease-in-out;
+        }
+        
+        .btn-animated:hover:not(:disabled) {
+            @apply bg-blue-700 transform -translate-y-1 shadow-xl;
+        }
+
+        .btn-animated:disabled {
+            @apply bg-gray-500 cursor-not-allowed opacity-70;
+        }
+
+        .input-field {
+            @apply w-full px-4 py-3 bg-gray-700/50 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center h-screen w-screen p-4">
+
+    <!-- This container is needed for invisible reCAPTCHA -->
+    <div id="recaptcha-container"></div>
+
+    <div class="w-full max-w-md">
+        <div class="glass-card p-8 shadow-2xl">
+            <div class="text-center mb-6">
+                <h1 class="text-3xl font-bold text-white mb-2">Sidor</h1>
+                <h2 class="text-xl text-gray-300">אפליקציית נהג</h2>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label for="phone" class="block text-sm font-medium text-gray-300 mb-1">מספר טלפון</label>
+                    <input type="tel" id="phone" name="phone" class="input-field" placeholder="05X-XXX-XXXX" dir="ltr">
+                </div>
+
+                <!-- In a real app, a 'Send Code' button and a 'Code' input would be here -->
+                
+                <button id="login-button" class="btn-animated w-full flex items-center justify-center">
+                    <svg id="loading-spinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    <span id="button-text">כניסה / הרשמה</span>
+                </button>
+            </div>
+            
+            <p id="message-output" class="text-center text-sm mt-4 hidden"></p>
+        </div>
+    </div>
+
+</body>
+</html>
