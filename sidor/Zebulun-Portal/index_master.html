@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sidor | פורטל שטח (זבולון)</title>
+
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 2. Leaflet.js for Maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- 3. OneSignal SDK -->
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      OneSignalDeferred.push(async function(OneSignal) {
+        await OneSignal.init({
+          appId: "de3834d3-1e11-40af-96d2-b25eda821c8f", // Detected App ID
+        });
+        OneSignal.User.addTag("app_name", "site_app_zebulun");
+      });
+    </script>
+
+    <!-- 4. Firebase SDK (Modern Modular v11+) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, where, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Config & Init ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        // --- Global State ---
+        let db, auth, userId, map;
+        let markersGroup = null;
+        const itemMarkers = new Map(); // Tracks all markers (drivers, orders)
+        let currentView = 'drivers'; // 'drivers' or 'orders'
+
+        // --- UI & Utility ---
+        const SmartLog = (module, message, level = 'info') => {
+            console[level](`[${module}] ${level.toUpperCase()}:`, message);
+        };
+
+        const showError = (title, message) => {
+            const modal = document.getElementById('error-modal');
+            const titleEl = document.getElementById('error-title');
+            const textEl = document.getElementById('error-text');
+            if (modal) modal.classList.remove('hidden');
+            if (titleEl) titleEl.textContent = title;
+            if (textEl) textEl.textContent = message;
+        };
+        
+        // --- Map Logic ---
+        function initMap() {
+            try {
+                map = L.map('map-view').setView([32.463, 34.908], 11); // Hadera area
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                }).addTo(map);
+                markersGroup = L.layerGroup().addTo(map);
+                SmartLog('Map', 'Map initialized successfully.');
+            } catch (e) {
+                SmartLog('Map.Error', e, 'error');
+                showError('שגיאת מפה', 'לא ניתן היה להפעיל את המפה.');
+            }
+        }
+
+        // Custom Icons for Map
+        const createIcon = (color) => L.divIcon({
+            html: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" class="w-8 h-8 drop-shadow-lg"><path fill-rule="evenodd" d="M11.54 22.351l.07.04.028.016a.76.76 0 00.723 0l.028-.015.071-.041A16.975 16.975 0 0012 21.75c-2.676 0-5.216-.584-7.499-1.632l-.004-.002c-.004-.002-.007-.003-.011-.005a.758.758 0 00-.346-.115L3.75 19.5c-.828 0-1.5-.672-1.5-1.5V4.5A2.25 2.25 0 014.5 2.25h15A2.25 2.25 0 0121.75 4.5v13.5c0 .828-.672 1.5-1.5 1.5h-.008a.75.75 0 00-.347.114l-.01.005c-.004.002-.007.003-.012.005A16.975 16.975 0 0012 21.75c-2.676 0-5.216-.584-7.499-1.632zM12 15.75a3.75 3.75 0 100-7.5 3.75 3.75 0 000 7.5z" clip-rule="evenodd" /></svg>`,
+            className: 'bg-transparent border-0',
+            iconSize: [32, 32],
+            iconAnchor: [16, 32]
+        });
+        
+        const driverIcon = createIcon('#2563EB'); // Blue
+        const orderIcon = createIcon('#16A34A');  // Green
+
+        function updateMapMarker(id, lat, lng, icon, popupContent) {
+            if (!map || !markersGroup || !lat || !lng) return;
+
+            if (itemMarkers.has(id)) {
+                const marker = itemMarkers.get(id);
+                marker.setLatLng([lat, lng]);
+                marker.setIcon(icon);
+                marker.getPopup().setContent(popupContent);
+            } else {
+                const marker = L.marker([lat, lng], { icon: icon })
+                    .addTo(markersGroup)
+                    .bindPopup(popupContent);
+                itemMarkers.set(id, marker);
+            }
+        }
+        
+        function removeMapMarker(id) {
+            if (itemMarkers.has(id)) {
+                markersGroup.removeLayer(itemMarkers.get(id));
+                itemMarkers.delete(id);
+            }
+        }
+
+        // --- Data Rendering ---
+        
+        function renderDriverList(drivers) {
+            const listEl = document.getElementById('item-list');
+            listEl.innerHTML = drivers.map(driver => `
+                <div class="list-item" data-id="${driver.id}" data-lat="${driver.location?.lat}" data-lng="${driver.location?.lng}">
+                    <h3 class="font-semibold">${driver.name || 'נהג לא ידוע'}</h3>
+                    <p class="text-sm">סטטוס: ${driver.status || 'לא זמין'}</p>
+                    <span class="status-dot ${driver.status === 'ONLINE' ? 'bg-green-500' : 'bg-gray-400'}"></span>
+                </div>
+            `).join('');
+            setupListItemListeners();
+        }
+
+        function renderOrderList(orders) {
+            const listEl = document.getElementById('item-list');
+            listEl.innerHTML = orders.map(order => `
+                <div class="list-item" data-id="${order.id}" data-lat="${order.location?.lat}" data-lng="${order.location?.lng}">
+                    <h3 class="font-semibold">הזמנה: ${order.orderId || order.id.substring(0, 6)}</h3>
+                    <p class="text-sm">לקוח: ${order.customerName || 'לא ידוע'}</p>
+                    <span class="status-dot ${order.status === 'PENDING' ? 'bg-yellow-500' : 'bg-blue-500'}"></span>
+                </div>
+            `).join('');
+            setupListItemListeners();
+        }
+
+        function setupListItemListeners() {
+            document.querySelectorAll('.list-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const lat = item.dataset.lat;
+                    const lng = item.dataset.lng;
+                    if (lat && lng && map) {
+                        map.flyTo([lat, lng], 15);
+                    }
+                });
+            });
+        }
+
+        // --- Firestore Listeners ---
+        
+        let unsubDrivers, unsubOrders;
+
+        function listenToDrivers() {
+            if (unsubDrivers) unsubDrivers();
+            const driversPath = `artifacts/${appId}/public/data/drivers`;
+            SmartLog('Firestore', `Listening to: ${driversPath}`);
+            
+            try {
+                const q = query(collection(db, driversPath), where('status', '==', 'ONLINE'));
+                unsubDrivers = onSnapshot(q, (snapshot) => {
+                    const drivers = [];
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        drivers.push({ ...data, id: doc.id });
+                        // Update map
+                        updateMapMarker(doc.id, data.location?.lat, data.location?.lng, driverIcon, `<b>נהג: ${data.name}</b><br>סטטוס: ${data.status}`);
+                    });
+                    if (currentView === 'drivers') {
+                        renderDriverList(drivers);
+                    }
+                }, handleError);
+            } catch (e) { handleError(e); }
+        }
+
+        function listenToOrders() {
+            if (unsubOrders) unsubOrders();
+            const ordersPath = `artifacts/${appId}/public/data/orders`;
+            SmartLog('Firestore', `Listening to: ${ordersPath}`);
+
+            try {
+                const q = query(collection(db, ordersPath), where('status', 'in', ['PENDING', 'IN_TRANSIT']));
+                unsubOrders = onSnapshot(q, (snapshot) => {
+                    const orders = [];
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        orders.push({ ...data, id: doc.id });
+                        // Update map
+                        updateMapMarker(doc.id, data.location?.lat, data.location?.lng, orderIcon, `<b>הזמנה: ${data.orderId}</b><br>לקוח: ${data.customerName}`);
+                    });
+                    if (currentView === 'orders') {
+                        renderOrderList(orders);
+                    }
+                }, handleError);
+            } catch (e) { handleError(e); }
+        }
+
+        function handleError(error) {
+            SmartLog('Firestore.Error', error, 'error');
+            console.error("Firestore Error: ", error);
+            if (error.message.includes("permission-denied")) {
+                showError("שגיאת הרשאות", "לא ניתן לטעון נתונים. בדוק את חוקי האבטחה (Security Rules) של Firestore.");
+            } else {
+                showError("שגיאת Firestore", error.message);
+            }
+        }
+
+        // --- UI Setup & Main ---
+        
+        function setupUIListeners() {
+            // Dark Mode
+            const toggle = document.getElementById('dark-mode-toggle');
+            toggle.addEventListener('click', () => {
+                document.body.classList.toggle('dark');
+                localStorage.setItem('darkMode', document.body.classList.contains('dark'));
+            });
+            if (localStorage.getItem('darkMode') === 'true') {
+                document.body.classList.add('dark');
+            }
+
+            // OneSignal Bell
+            const bell = document.getElementById('onesignal-bell');
+            bell.addEventListener('click', () => {
+                OneSignalDeferred.push(function(OneSignal) {
+                    SmartLog('OneSignal', 'Prompting for push notifications.');
+                    OneSignal.Slidedown.promptPush();
+                });
+            });
+
+            // Error Modal Close
+            document.getElementById('close-error-btn').addEventListener('click', () => {
+                document.getElementById('error-modal').classList.add('hidden');
+            });
+
+            // Tab Navigation
+            document.getElementById('tab-drivers').addEventListener('click', () => switchView('drivers'));
+            document.getElementById('tab-orders').addEventListener('click', () => switchView('orders'));
+        }
+
+        function switchView(view) {
+            currentView = view;
+            document.getElementById('tab-drivers').classList.toggle('active', view === 'drivers');
+            document.getElementById('tab-orders').classList.toggle('active', view === 'orders');
+            document.getElementById('list-title').textContent = view === 'drivers' ? 'נהגים פעילים' : 'הזמנות פתוחות';
+            
+            // Re-render lists immediately without waiting for Firestore
+            if (view === 'drivers') {
+                listenToDrivers(); // This will re-fetch and render
+            } else {
+                listenToOrders(); // This will re-fetch and render
+            }
+        }
+        
+        async function main() {
+            SmartLog('Init', 'Zebulun Site App Initializing...');
+            
+            // --- FIX: Guard Clause for Firebase Config ---
+            if (!firebaseConfig.projectId) {
+                SmartLog('Auth.Error', 'Firebase config is missing or invalid. "projectId" is required.', 'error');
+                showError('שגיאת הגדרה קריטית', 'Firebase config is missing. "projectId" is required.');
+                return; // Stop execution
+            }
+            // --- End Fix ---
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('Debug');
+
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                    SmartLog('Auth', 'Signed in with custom token.');
+                } else {
+                    await signInAnonymously(auth);
+                    SmartLog('Auth', 'No token provided, signed in anonymously.');
+                }
+
+                userId = auth.currentUser.uid;
+                SmartLog('Auth', `Auth successful. User ID: ${userId.substring(0,10)}...`);
+                
+                initMap();
+                setupUIListeners();
+                switchView('drivers'); // Start with drivers view
+
+            } catch (error) {
+                SmartLog('Auth.Error', error, 'error');
+                console.error("Auth Error: ", error);
+                showError(`שגיאת אימות: ${error.message}`);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', main);
+    </script>
+
+    <!-- 5. Custom Styles -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        :root {
+            --bg-light: #f4f7f6;
+            --bg-dark: #1a202c;
+            --card-light: rgba(255, 255, 255, 0.7);
+            --card-dark: rgba(26, 32, 44, 0.7);
+            --border-light: rgba(255, 255, 255, 0.6);
+            --border-dark: rgba(255, 255, 255, 0.2);
+            --text-light: #2d3748;
+            --text-dark: #e2e8f0;
+            --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            color: var(--text-light);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        body.dark {
+            background-color: var(--bg-dark);
+            color: var(--text-dark);
+        }
+        .glass-card {
+            background: var(--card-light);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--border-light);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+        }
+        body.dark .glass-card {
+            background: var(--card-dark);
+            border: 1px solid var(--border-dark);
+        }
+        .icon-btn {
+            @apply p-2 rounded-full transition-all duration-200;
+        }
+        .icon-btn:hover {
+            @apply bg-gray-500/20 transform scale-110;
+        }
+        .tab-btn {
+            @apply w-full text-center px-4 py-3 font-medium text-gray-500 dark:text-gray-400 border-b-2 border-transparent transition-all;
+        }
+        .tab-btn.active {
+            @apply text-blue-600 dark:text-blue-400 border-blue-600 dark:border-blue-400;
+        }
+        .list-item {
+            @apply p-4 rounded-lg bg-gray-500/5 dark:bg-gray-900/20 cursor-pointer transition-all relative;
+        }
+        .list-item:hover {
+            @apply bg-gray-500/10 dark:bg-gray-900/30 transform scale-[1.02];
+        }
+        .status-dot {
+            @apply absolute left-4 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 border-white dark:border-gray-800;
+        }
+        #map-view {
+            height: 100%;
+            width: 100%;
+            border-radius: 12px;
+            z-index: 10;
+        }
+        .modal-backdrop {
+            @apply fixed inset-0 z-40 flex items-center justify-center;
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(5px);
+        }
+        .btn-danger {
+            @apply px-4 py-2 rounded-lg font-semibold text-white shadow-md transition-all duration-200 ease-in-out bg-red-600;
+        }
+        .btn-danger:hover {
+            @apply bg-red-700 transform scale-105;
+        }
+        .hidden { display: none; }
+    </style>
+</head>
+<body class="overflow-hidden">
+
+    <div class="flex h-screen w-screen p-4 gap-4">
+
+        <!-- Sidebar (List View) -->
+        <aside class="w-full md:w-96 glass-card flex-shrink-0 flex flex-col">
+            <!-- Header -->
+            <div class="p-4 flex-shrink-0 flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-gray-800 dark:text-white">פורטל שטח</h1>
+                <div class="flex items-center gap-2">
+                    <button id="onesignal-bell" class="icon-btn text-gray-700 dark:text-gray-200" title="קבל התראות">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.73.64 3.58 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" /></svg>
+                    </button>
+                    <button id="dark-mode-toggle" class="icon-btn text-gray-700 dark:text-gray-200" title="שנה מצב תצוגה">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" /></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <nav class="flex-shrink-0 flex border-b border-gray-500/20">
+                <button id="tab-drivers" class="tab-btn active">נהגים</button>
+                <button id="tab-orders" class="tab-btn">הזמנות</button>
+            </nav>
+
+            <!-- Item List -->
+            <div class="flex-grow p-4 min-h-0">
+                <h2 id="list-title" class="text-lg font-semibold mb-3">נהגים פעילים</h2>
+                <div id="item-list" class="h-full overflow-y-auto space-y-3 pr-1">
+                    <!-- List items injected by JS -->
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content (Map) -->
+        <main class="flex-1 glass-card min-w-0 rounded-lg overflow-hidden p-1">
+            <div id="map-view"></div>
+        </main>
+    </div>
+
+    <!-- Error Modal -->
+    <div id="error-modal" class="modal-backdrop hidden">
+        <div class="glass-card max-w-sm w-full p-6 rounded-lg shadow-lg">
+            <div class="flex items-center gap-3">
+                <div class="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 dark:bg-red-800/50 flex items-center justify-center">
+                    <svg class="w-6 h-6 text-red-600 dark:text-red-300" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" /></svg>
+                </div>
+                <div class="flex-grow">
+                    <h3 id="error-title" class="font-bold text-lg text-red-800 dark:text-red-200">שגיאה</h3>
+                    <p id="error-text" class="text-sm text-red-700 dark:text-red-300">לא ניתן היה לטעון את הנתונים.</p>
+                </div>
+            </div>
+            <button id="close-error-btn" class="btn-danger w-full mt-5">סגור</button>
+        </div>
+    </div>
+
+</body>
+</html>
