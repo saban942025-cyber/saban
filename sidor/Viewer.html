@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sidor | Real-time Log Viewer</title>
+
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 2. OneSignal SDK -->
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      OneSignalDeferred.push(async function(OneSignal) {
+        await OneSignal.init({
+          appId: "de3834d3-1e11-40af-96d2-b25eda821c8f", // Using the same detected App ID
+        });
+        OneSignal.User.addTag("app_name", "log_viewer");
+      });
+    </script>
+
+    <!-- 3. Firebase SDK (Modern Modular v11+) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, orderBy, limit, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Config & Init ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let db, auth, userId;
+        let unsubscribeLogs; // To hold the listener
+
+        // --- UI & Utility ---
+        const SmartLog = (module, message, level = 'info') => {
+            console[level](`[${module}] ${level.toUpperCase()}:`, message);
+        };
+
+        const showMessage = (message, level = 'info') => {
+            const statusEl = document.getElementById('status-bar');
+            if (!statusEl) return;
+            statusEl.textContent = message;
+            statusEl.classList.remove('text-green-400', 'text-yellow-400', 'text-red-400');
+            if (level === 'info') statusEl.classList.add('text-green-400');
+            if (level === 'warn') statusEl.classList.add('text-yellow-400');
+            if (level === 'error') statusEl.classList.add('text-red-400');
+        };
+
+        const getLogLevelColor = (level) => {
+            switch (level.toUpperCase()) {
+                case 'INFO': return 'text-blue-400';
+                case 'WARN': return 'text-yellow-400';
+                case 'ERROR': return 'text-red-400';
+                case 'FATAL': return 'bg-red-600 text-white font-bold';
+                case 'DEBUG': return 'text-gray-500';
+                default: return 'dark:text-white';
+            }
+        };
+
+        /**
+         * Renders a new log entry to the top of the list.
+         */
+        const renderLogEntry = (log) => {
+            const container = document.getElementById('log-container');
+            if (!container) return;
+
+            const { timestamp, module, level, message } = log;
+            const timeString = timestamp ? new Date(timestamp.seconds * 1000).toLocaleTimeString('he-IL') : 'N/A';
+            const colorClass = getLogLevelColor(level || 'INFO');
+
+            const entry = document.createElement('div');
+            entry.className = `p-2.5 border-b border-gray-500/20 font-mono text-sm ${colorClass}`;
+            entry.innerHTML = `
+                <span class="w-20 inline-block">${timeString}</span>
+                <span class="font-bold w-24 inline-block">[${module || 'APP'}]</span>
+                <span class="w-16 inline-block">${level || 'INFO'}</span>
+                <span>${message}</span>
+            `;
+            
+            // Prepend (add to top) and keep list tidy
+            container.prepend(entry);
+            if (container.children.length > 100) {
+                container.removeChild(container.lastChild);
+            }
+        };
+
+        /**
+         * Listens to Firestore for real-time logs.
+         */
+        function listenToLogs() {
+            if (unsubscribeLogs) unsubscribeLogs(); // Stop any previous listener
+            
+            showMessage('מתחבר ל-Firestore...', 'info');
+            
+            // CORRECTED PATH: Use public-facing, secure path for logs
+            const collectionPath = `artifacts/${appId}/public/data/logs`;
+            SmartLog('Firestore', `Listening to collection: ${collectionPath}`);
+            
+            try {
+                const logsCol = collection(db, collectionPath);
+                // Query for the last 20 logs, ordered by time
+                const q = query(logsCol, orderBy('timestamp', 'desc'), limit(20));
+
+                unsubscribeLogs = onSnapshot(q, (snapshot) => {
+                    showMessage(`מחובר. קולט ${snapshot.size} לוגים.`, 'info');
+                    
+                    // Clear container for initial load
+                    const container = document.getElementById('log-container');
+                    container.innerHTML = ''; 
+
+                    const logs = [];
+                    snapshot.forEach(doc => logs.push(doc.data()));
+                    
+                    // Render them (newest first, so we reverse)
+                    logs.reverse().forEach(log => {
+                        renderLogEntry(log);
+                    });
+
+                }, (error) => {
+                    SmartLog('Firestore.Error', error, 'error');
+                    console.error("Firestore Snapshot Error: ", error);
+                    showMessage('שגיאת Firestore. בדוק הרשאות.', 'error');
+                });
+
+            } catch (e) {
+                SmartLog('Firestore.Catch', e, 'error');
+                console.error("Firestore Setup Error: ", e);
+                showMessage(`שגיאת התחברות: ${e.message}`, 'error');
+            }
+        }
+
+        /**
+         * Sets up UI listeners for dark mode, etc.
+         */
+        function setupUIListeners() {
+            // Dark Mode Toggle
+            const toggle = document.getElementById('dark-mode-toggle');
+            toggle.addEventListener('click', () => {
+                document.body.classList.toggle('dark');
+                localStorage.setItem('darkMode', document.body.classList.contains('dark'));
+            });
+
+            if (localStorage.getItem('darkMode') === 'true') {
+                document.body.classList.add('dark');
+            }
+
+            // OneSignal Bell
+            const bell = document.getElementById('onesignal-bell');
+            bell.addEventListener('click', () => {
+                OneSignalDeferred.push(function(OneSignal) {
+                    SmartLog('OneSignal', 'Prompting for push notifications.');
+                    OneSignal.Slidedown.promptPush();
+                });
+            });
+        }
+        
+        /**
+         * Main function to start the application.
+         */
+        async function main() {
+            showMessage('מפעיל אפליקציה...', 'warn');
+            
+            // --- FIX: Guard Clause for Firebase Config ---
+            if (!firebaseConfig.projectId) {
+                SmartLog('Auth.Error', 'Firebase config is missing or invalid. "projectId" is required.', 'error');
+                showMessage('שגיאת הגדרה קריטית. "projectId" חסר.', 'error');
+                return; // Stop execution
+            }
+            // --- End Fix ---
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('Debug');
+
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                    SmartLog('Auth', 'Signed in with custom token.');
+                } else {
+                    await signInAnonymously(auth);
+                    SmartLog('Auth', 'No token provided, signed in anonymously.');
+                }
+
+                userId = auth.currentUser.uid;
+                SmartLog('Auth', `Auth successful. User ID: ${userId}`);
+                
+                setupUIListeners();
+                listenToLogs(); // Start listening for logs
+
+            } catch (error) {
+                SmartLog('Auth.Error', error, 'error');
+                console.error("Auth Error: ", error);
+                showMessage(`שגיאת אימות: ${error.message}`, 'error');
+            }
+        }
+
+        // --- Start App ---
+        document.addEventListener('DOMContentLoaded', main);
+    </script>
+
+    <!-- 4. Custom Styles -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Fira+Code:wght@400&display=swap');
+
+        :root {
+            --bg-light: #f4f7f6;
+            --bg-dark: #1a202c;
+            --card-light: rgba(255, 255, 255, 0.4);
+            --card-dark: rgba(45, 55, 72, 0.4);
+            --border-light: rgba(255, 255, 255, 0.6);
+            --border-dark: rgba(255, 255, 255, 0.2);
+            --text-light: #2d3748;
+            --text-dark: #e2e8f0;
+            --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            color: var(--text-light);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        body.dark {
+            background-color: var(--bg-dark);
+            color: var(--text-dark);
+        }
+
+        .font-mono {
+             font-family: 'Fira Code', monospace;
+        }
+
+        .glass-card {
+            background: var(--card-light);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--border-light);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+        }
+
+        body.dark .glass-card {
+            background: var(--card-dark);
+            border: 1px solid var(--border-dark);
+        }
+        
+        .icon-btn {
+            @apply p-2 rounded-full transition-all duration-200;
+        }
+        .icon-btn:hover {
+            @apply bg-gray-500/20 transform scale-110;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Custom scrollbar for log container */
+        #log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        #log-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        #log-container::-webkit-scrollbar-thumb {
+            background-color: rgba(150, 150, 150, 0.3);
+            border-radius: 20px;
+        }
+        body.dark #log-container::-webkit-scrollbar-thumb {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+    </style>
+</head>
+<body class="overflow-hidden">
+
+    <div id="app-container" class="h-screen w-screen flex flex-col p-4 gap-4">
+        
+        <!-- Header -->
+        <header class="glass-card flex-shrink-0 p-4 rounded-lg flex justify-between items-center">
+            <div>
+                <h1 class="text-xl font-bold text-gray-800 dark:text-white">Sidor | Real-time Log Viewer</h1>
+                <p id="status-bar" class="text-xs font-mono"></p>
+            </div>
+            <div class="flex items-center gap-3">
+                <button id="onesignal-bell" class="icon-btn text-gray-700 dark:text-gray-200" title="קבל התראות">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.73.64 3.58 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                    </svg>
+                </button>
+                <button id="dark-mode-toggle" class="icon-btn text-gray-700 dark:text-gray-200" title="שנה מצב תצוגה">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content: Log Container -->
+        <main class="flex-grow glass-card min-h-0 rounded-lg p-1">
+            <div id="log-container" class="h-full w-full overflow-y-auto rounded-lg bg-gray-800/5 dark:bg-gray-900/20 p-2">
+                <!-- Log entries will be injected here by JS -->
+            </div>
+        </main>
+
+    </div>
+
+</body>
+</html>
